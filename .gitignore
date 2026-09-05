@@ -1,0 +1,4 @@
+/nexus.db
+/.env
+/config.yml
+*.db
