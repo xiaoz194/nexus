@@ -13,14 +13,25 @@ export interface StreamHandlers {
   onDelta: (delta: string) => void
 }
 
+// StreamStoppedError 表示用户主动中断（点了「停止」），区别于真正的请求失败：
+// 调用方应保留已生成内容、不弹错、不标记失败。
+export class StreamStoppedError extends Error {
+  constructor() {
+    super('已停止生成')
+    this.name = 'StreamStoppedError'
+    Object.setPrototypeOf(this, StreamStoppedError.prototype)
+  }
+}
+
 // sendMessageStream 以 SSE 流式发送消息：逐块回调 onDelta，
-// 结束时 resolve 出完整落库的 assistant 消息。
+// 结束时 resolve 出完整落库的 assistant 消息。传入 signal 可中途中断。
 // 浏览器原生 EventSource 只支持 GET，这里用 fetch + ReadableStream 读 SSE。
 export async function sendMessageStream(
   agentId: string,
   conversationId: string,
   content: string,
   handlers: StreamHandlers,
+  signal?: AbortSignal,
 ): Promise<Message> {
   let res: Response
   try {
@@ -32,9 +43,11 @@ export async function sendMessageStream(
         body: JSON.stringify({ content }),
         // 流式 fetch 绕过了 client.ts，需单独带上会话 cookie。
         credentials: 'include',
+        signal,
       },
     )
   } catch {
+    if (signal?.aborted) throw new StreamStoppedError()
     throw new ApiError(0, '无法连接到服务器，请确认后端已启动')
   }
 
@@ -75,17 +88,23 @@ export async function sendMessageStream(
     }
   }
 
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    // SSE 事件以空行分隔。
-    let sep: number
-    while ((sep = buffer.indexOf('\n\n')) !== -1) {
-      const event = buffer.slice(0, sep)
-      buffer = buffer.slice(sep + 2)
-      handleEvent(event)
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // SSE 事件以空行分隔。
+      let sep: number
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const event = buffer.slice(0, sep)
+        buffer = buffer.slice(sep + 2)
+        handleEvent(event)
+      }
     }
+  } catch (e) {
+    // 用户中断：reader.read() 会以 AbortError 拒绝，转成 StreamStoppedError。
+    if (signal?.aborted) throw new StreamStoppedError()
+    throw e
   }
   if (buffer.trim()) handleEvent(buffer)
 

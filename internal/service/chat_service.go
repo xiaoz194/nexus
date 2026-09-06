@@ -199,7 +199,17 @@ func (s *ChatService) SendMessageStream(ctx context.Context, userID, agentID, co
 	started := time.Now()
 	reply, err := p.provider.ChatStream(ctx, p.req, onDelta)
 	if err != nil {
-		// 失败不落库，允许前端原样重试。
+		// 客户端主动中断（前端点「停止」→ 断开连接 → ctx 取消）：把已生成的
+		// 部分回复当作一次「提前停止」落库，让它刷新后仍在。ChatStream 在 ctx 取消
+		// 时会连同已累积文本一起返回，故此处 reply 可能非空。
+		if errors.Is(err, context.Canceled) {
+			if reply == "" {
+				return nil, err // 还没吐出任何字就停了，不落库
+			}
+			log.Printf("流式被客户端中断，保存部分回复 provider=%s model=%s 长度=%d", p.agent.ModelProvider, p.agent.ModelName, len(reply))
+			return s.persistExchange(conversationID, content, reply)
+		}
+		// 其余为真正失败：不落库，允许前端原样重试。
 		log.Printf("LLM 流式调用失败 provider=%s model=%s 耗时=%s: %v", p.agent.ModelProvider, p.agent.ModelName, time.Since(started).Round(time.Millisecond), err)
 		return nil, err
 	}

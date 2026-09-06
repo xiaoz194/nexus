@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { useConversationsStore } from '../stores/conversations'
 import { useChatStore } from '../stores/chat'
 import MessageBubble from './MessageBubble.vue'
@@ -10,25 +10,49 @@ const chat = useChatStore()
 const draft = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
 
-async function scrollToBottom() {
-  await nextTick()
+// stick=true 时视图跟随最新消息；用户手动往上滚离底部则暂停跟随（不打断阅读），
+// 滚回底部又自动恢复。滚动写入按帧节流，避免流式每吐一帧都强制回流。
+let stick = true
+let scrollScheduled = false
+
+function onScroll() {
   const el = scrollEl.value
-  if (el) el.scrollTop = el.scrollHeight
+  if (!el) return
+  stick = el.scrollHeight - el.scrollTop - el.clientHeight < 80
 }
 
-// 始终把视图固定到最新消息：新消息追加时，以及流式增量填充最后一条时都跟随滚动。
+function scheduleScroll() {
+  if (scrollScheduled || !stick) return
+  scrollScheduled = true
+  requestAnimationFrame(() => {
+    scrollScheduled = false
+    const el = scrollEl.value
+    if (el && stick) el.scrollTop = el.scrollHeight
+  })
+}
+
+// 消息数量变化或最后一条内容增长（流式）时，按需跟随滚动到底部。
 watch(
   () => {
     const last = chat.messages[chat.messages.length - 1]
     return `${chat.messages.length}:${last ? last.content.length : 0}`
   },
-  scrollToBottom,
+  scheduleScroll,
+)
+
+// 切换会话时重新固定到底部。
+watch(
+  () => conversations.selectedId,
+  () => {
+    stick = true
+  },
 )
 
 async function onSend() {
   const content = draft.value.trim()
   if (!content || chat.sending) return
   draft.value = ''
+  stick = true // 自己发消息时强制回到底部
   await chat.send(content)
 }
 </script>
@@ -46,7 +70,11 @@ async function onSend() {
         </h2>
       </div>
 
-      <div ref="scrollEl" class="flex-1 space-y-4 overflow-y-auto px-6 py-4">
+      <div
+        ref="scrollEl"
+        class="flex-1 space-y-4 overflow-y-auto px-6 py-4"
+        @scroll.passive="onScroll"
+      >
         <p v-if="chat.loading" class="text-center text-sm text-gray-400">加载历史中…</p>
         <p
           v-else-if="chat.messages.length === 0"
@@ -73,11 +101,20 @@ async function onSend() {
             @keydown.enter.exact.prevent="onSend"
           />
           <button
+            v-if="chat.sending"
+            type="button"
+            class="rounded-lg bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700"
+            @click="chat.stop()"
+          >
+            停止
+          </button>
+          <button
+            v-else
             type="submit"
-            :disabled="!draft.trim() || chat.sending"
+            :disabled="!draft.trim()"
             class="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {{ chat.sending ? '发送中' : '发送' }}
+            发送
           </button>
         </form>
       </div>

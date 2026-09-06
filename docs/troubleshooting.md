@@ -182,6 +182,20 @@ const assistantRef = messages.value[messages.value.length - 1] // 代理
 
 > 记忆点：**往 `ref`/`reactive` 容器里放对象后，必须通过容器读回来的引用去改**；手里那个「放进去之前的原始对象」改了不算数。
 
+### 5.2 流式输出「一顿一顿」很卡顿
+
+**现象**：AI 回复能出，但不是平滑逐字，而是**大块大块地跳出来**、并伴随滚动抖动。
+
+**根因**（两处叠加）：
+1. **突发投递没有平滑**：后端每个 delta 都 flush（正确），但经 **NexAPI 中转网关**时它会**缓冲后成块下发**，前端原先把每个 delta 直接 `assistantRef.content += delta`，网关吐多大块、气泡就跳多大块 → 观感一顿一顿。
+2. **滚动每 token 都强制回流**：[ChatPanel.vue](../web/src/components/ChatPanel.vue) 原先 watch `content.length`，每变一次就 `nextTick` + 读 `scrollHeight`（强制同步 layout reflow）并把视图拽到底——一条回复触发几十上百次，既抖又和「用户上滚看历史」打架。
+
+**解决**：
+- **rAF 缓冲平滑吐字**（[stores/chat.ts](../web/src/stores/chat.ts) 的 `runExchange`）：网络 delta 先进 `buffer`，用 `requestAnimationFrame` 每帧吐 `max(2, ceil(buffer.length/4))` 个字——缓冲越多吐越快（长回复不积压）、最少 2 字（短块也有动画感），把网关的突发块摊平成 ~60fps 的稳定流。流结束后 `await waitDrained()` 等缓冲吐完再用落库消息定稿，避免结尾突然跳变；出错则 `cancelAnimationFrame` 停掉。
+- **滚动按帧节流 + 粘底**（[ChatPanel.vue](../web/src/components/ChatPanel.vue)）：`stick` 标志——离底 <80px 才跟随；用户上滚即暂停跟随（不打断阅读），滚回底部自动恢复；滚动写入用 rAF 合并到每帧一次。切换会话、自己发消息时强制 `stick=true` 回到底部。`@scroll.passive` 更新 `stick`。
+
+> 记忆点：流式 UI 想顺滑，别把「网络到达节奏」直接当「渲染节奏」——用 rAF 做一层缓冲/节流，把到达与渲染解耦。
+
 ---
 
 ## 六、Claude 原生 Provider（顶层 system）
@@ -275,6 +289,22 @@ LLM 返回错误(status=429): All providers are saturated; retry shortly (reques
 DELETE FROM messages; DELETE FROM conversations; DELETE FROM agents;
 ```
 > 顺序很重要：清空 SQL 要在启动新 server **之前**跑（直接连 Postgres 执行，与服务无关）。若将来不想清空而要保留旧数据，则应改为「先加可空列 → 回填 user_id → 再改 NOT NULL」的三步迁移。
+
+---
+
+## 九、回答可手动中断（停止生成）
+
+**需求**：回答生成中可以点「停止」提前收尾，且已生成的部分要保留（刷新后仍在）。
+
+**做法（复用「客户端断连 → ctx 取消」这条链）**：
+- **前端**（[stores/chat.ts](../web/src/stores/chat.ts) / [api/messages.ts](../web/src/api/messages.ts)）：`runExchange` 里建一个 `AbortController`，signal 传给流式 `fetch`；`stop()` 调 `abortController.abort()`。中断时 `reader.read()` 会以 `AbortError` 拒绝，`messages.ts` 据 `signal.aborted` 把它转成自定义的 `StreamStoppedError`，与「真正失败」区分开——**保留已生成内容为正常消息、不弹错、不标记失败**（一个字都没生成就停则移除空占位）。停止时还会把 rAF 平滑缓冲里剩余文本一次性补上，避免被截断。
+- **UI**（[ChatPanel.vue](../web/src/components/ChatPanel.vue)）：生成中把「发送」按钮换成红色「停止」按钮，点它调 `chat.stop()`。
+- **后端**（[chat_service.go](../internal/service/chat_service.go) 的 `SendMessageStream`）：`abort` 使 HTTP 连接断开 → `c.Request.Context()` 取消 → provider 的 `ChatStream`（请求用 `NewRequestWithContext` 绑定了 ctx）**连同已累积文本一起返回 `(partial, context.Canceled)`**。服务层判 `errors.Is(err, context.Canceled)`：partial 非空就**把这段部分回复落库**（视为「提前停止」），空则不落库。这样中断的回答刷新后仍在，且**上游 LLM 生成也被 ctx 一并取消**，不白烧 token。
+
+**关键点**：
+- `persistExchange` 用的是基础 `s.db`（非请求 ctx 绑定），故即便请求 ctx 已取消，落库仍能正常写入。
+- 落库走 `%w` 包装的错误链，`errors.Is(err, context.Canceled)` 无论从 `select{<-ctx.Done()}` 还是「读取流式响应失败: %w」分支返回都能匹配。
+- 只认 `context.Canceled`（用户主动停）；`context.DeadlineExceeded`（真超时）仍按失败处理、可重试。
 
 ---
 

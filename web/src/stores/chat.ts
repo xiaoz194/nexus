@@ -22,6 +22,14 @@ export const useChatStore = defineStore('chat', () => {
   const agentId = ref<string | null>(null)
   const conversationId = ref<string | null>(null)
 
+  // 当前流式请求的中断器；点「停止」时 abort，让本轮回答提前收尾。
+  let abortController: AbortController | null = null
+
+  // stop 主动中断正在生成的回答（已生成的部分会保留，后端也会把它落库）。
+  function stop() {
+    abortController?.abort()
+  }
+
   function reset() {
     messages.value = []
     agentId.value = null
@@ -52,12 +60,57 @@ export const useChatStore = defineStore('chat', () => {
     assistantRef: ChatMessage,
   ) {
     sending.value = true
-    try {
-      const reply = await msgApi.sendMessageStream(aId, cId, content, {
-        onDelta: (delta) => {
-          assistantRef.content += delta
-        },
+
+    // 平滑吐字：网络 delta 先进缓冲，用 requestAnimationFrame 每帧稳定地写入气泡，
+    // 把中转网关的「突发大块」摊平成逐字流出，避免一顿一顿的卡顿。
+    let buffer = ''
+    let streaming = true
+    let rafId = 0
+    let onDrained: (() => void) | null = null
+
+    const pump = () => {
+      if (buffer) {
+        // 缓冲越多每帧吐越多，保证长回复不积压；最少 2 字，短块也有动画感。
+        const step = Math.max(2, Math.ceil(buffer.length / 4))
+        assistantRef.content += buffer.slice(0, step)
+        buffer = buffer.slice(step)
+      }
+      if (streaming || buffer) {
+        rafId = requestAnimationFrame(pump)
+      } else {
+        rafId = 0
+        onDrained?.()
+      }
+    }
+    const startPump = () => {
+      if (!rafId) rafId = requestAnimationFrame(pump)
+    }
+    // 等缓冲清空（流已结束且没有待吐文本），避免结尾突然跳变。
+    const waitDrained = () =>
+      new Promise<void>((resolve) => {
+        if (!streaming && !buffer) resolve()
+        else onDrained = resolve
       })
+
+    const controller = new AbortController()
+    abortController = controller
+
+    try {
+      const reply = await msgApi.sendMessageStream(
+        aId,
+        cId,
+        content,
+        {
+          onDelta: (delta) => {
+            buffer += delta
+            startPump()
+          },
+        },
+        controller.signal,
+      )
+      streaming = false
+      startPump()
+      await waitDrained()
       userRef.pending = false
       userRef.failed = false
       // 用服务端落库的真实消息（含最终 id/时间）替换占位内容。
@@ -67,18 +120,40 @@ export const useChatStore = defineStore('chat', () => {
       assistantRef.streaming = false
       assistantRef.failed = false
     } catch (e) {
-      userRef.pending = false
-      userRef.failed = true
-      // 移除空的 assistant 占位气泡；若已收到部分内容则标记失败保留。
-      if (assistantRef.content) {
-        assistantRef.streaming = false
-        assistantRef.failed = true
-      } else {
-        const i = messages.value.indexOf(assistantRef)
-        if (i !== -1) messages.value.splice(i, 1)
+      streaming = false
+      if (rafId) cancelAnimationFrame(rafId)
+      // 把已收到但还没吐完的缓冲一次性补上，避免停止时内容被截断。
+      if (buffer) {
+        assistantRef.content += buffer
+        buffer = ''
       }
-      toast.error((e as Error).message)
+      userRef.pending = false
+
+      if (e instanceof msgApi.StreamStoppedError) {
+        // 用户主动停止：保留已生成内容作为正常消息（后端已把这部分落库），不弹错。
+        userRef.failed = false
+        if (assistantRef.content) {
+          assistantRef.streaming = false
+          assistantRef.failed = false
+        } else {
+          // 一个字都还没生成就停了 → 移除空占位，user 也不算失败。
+          const i = messages.value.indexOf(assistantRef)
+          if (i !== -1) messages.value.splice(i, 1)
+        }
+      } else {
+        userRef.failed = true
+        // 移除空的 assistant 占位气泡；若已收到部分内容则标记失败保留。
+        if (assistantRef.content) {
+          assistantRef.streaming = false
+          assistantRef.failed = true
+        } else {
+          const i = messages.value.indexOf(assistantRef)
+          if (i !== -1) messages.value.splice(i, 1)
+        }
+        toast.error((e as Error).message)
+      }
     } finally {
+      if (abortController === controller) abortController = null
       sending.value = false
     }
   }
@@ -152,5 +227,5 @@ export const useChatStore = defineStore('chat', () => {
     await runExchange(aId, cId, userRef.content, userRef, assistantRef)
   }
 
-  return { messages, loading, sending, agentId, conversationId, reset, loadFor, send, retry }
+  return { messages, loading, sending, agentId, conversationId, reset, loadFor, send, retry, stop }
 })
