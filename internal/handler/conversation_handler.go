@@ -51,6 +51,26 @@ func (h *ConversationHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, convs)
 }
 
+type updateConversationRequest struct {
+	Title string `json:"title" binding:"required"`
+}
+
+// Update 处理 PUT /agents/:agent_id/conversations/:conversation_id（重命名）。
+func (h *ConversationHandler) Update(c *gin.Context) {
+	var req updateConversationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	conv, err := h.svc.Update(currentUserID(c), c.Param("agent_id"), c.Param("conversation_id"), req.Title)
+	if err != nil {
+		handleServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, conv)
+}
+
 // Delete 处理 DELETE /agents/:agent_id/conversations/:conversation_id。
 func (h *ConversationHandler) Delete(c *gin.Context) {
 	err := h.svc.Delete(currentUserID(c), c.Param("agent_id"), c.Param("conversation_id"))

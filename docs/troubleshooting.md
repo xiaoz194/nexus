@@ -308,6 +308,22 @@ DELETE FROM messages; DELETE FROM conversations; DELETE FROM agents;
 
 ---
 
+## 十、会话可重命名（所有会话都叫「新会话」）
+
+**现象**：会话标题有 GORM `default:新会话`，但没有任何改名入口，所有会话都叫「新会话」无法区分。
+
+**根因**：只实现了会话的建/查/删，缺 Update 通路；前端也只有静态标题、无编辑交互。
+
+**做法（补全 Update 全链，并让新建即进编辑态）**：
+- **后端**：`conversation_service.go` 加 `Update(userID, agentID, conversationID, title)`——先 `ensureAgentOwned` 做归属校验（沿用顶层 user_id 隔离），`strings.TrimSpace` 后空标题返回 `ErrInvalidInput`，再按 `id=? AND agent_id=?` 定位并只更新 `title`。`conversation_handler.go` 加 `Update`（`updateConversationRequest{ Title binding:"required" }`）；路由 `PUT /agents/:agent_id/conversations/:conversation_id`。
+- **前端**：`api/conversations.ts` 加 `updateConversation`；`stores/conversations.ts` 加 `rename(id, title)`（trim、成功后按索引替换列表项、失败 toast）；`ConversationList.vue` 改成行内编辑——「重命名」进编辑态、Enter/blur 提交、Esc 取消。**新建会话后自动进入编辑态**，用户可直接起名（不改则保留「新会话」）。
+
+**关键点（两个坑）**：
+- **Enter + blur 重复提交**：Enter 提交后输入框失焦又触发 blur，会重复提交。`commitRename` 用 `if (editingId.value !== conv.id) return` 守卫——第一次提交已把 `editingId` 置空，第二次直接返回。
+- **v-for 里的字符串 ref 会变成数组**：Vue 3 中 `ref="editInput"` 若在 `v-for` 内会被收集成数组，`editInput.value?.focus()` 会失效。改用**函数 ref** `:ref="setEditInput"` 直接拿到当前唯一在编辑的输入框元素（配合 `nextTick` 后 focus + select）。
+
+---
+
 ## 附：常用排障命令
 
 ```bash

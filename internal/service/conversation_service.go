@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -50,6 +51,29 @@ func (s *ConversationService) List(userID, agentID string) ([]model.Conversation
 		return nil, err
 	}
 	return convs, nil
+}
+
+// Update 重命名指定会话（Agent 须归属于 userID）。标题去空白后不可为空。
+func (s *ConversationService) Update(userID, agentID, conversationID, title string) (*model.Conversation, error) {
+	if err := s.ensureAgentOwned(userID, agentID); err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, ErrInvalidInput
+	}
+
+	var conv model.Conversation
+	if err := s.db.First(&conv, "id = ? AND agent_id = ?", conversationID, agentID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrConversationNotFound
+		}
+		return nil, err
+	}
+	if err := s.db.Model(&conv).Update("title", title).Error; err != nil {
+		return nil, err
+	}
+	return &conv, nil
 }
 
 // Delete 在单个事务内删除会话（Agent 须归属于 userID）及其全部消息。

@@ -55,6 +55,21 @@ export const useConversationsStore = defineStore('conversations', () => {
     }
   }
 
+  async function rename(id: string, title: string): Promise<boolean> {
+    if (!agentId.value) return false
+    const t = title.trim()
+    if (!t) return false
+    try {
+      const conv = await convApi.updateConversation(agentId.value, id, t)
+      const idx = conversations.value.findIndex((c) => c.id === id)
+      if (idx !== -1) conversations.value[idx] = conv
+      return true
+    } catch (e) {
+      toast.error((e as Error).message)
+      return false
+    }
+  }
+
   async function remove(id: string): Promise<boolean> {
     if (!agentId.value) return false
     try {
@@ -78,6 +93,7 @@ export const useConversationsStore = defineStore('conversations', () => {
     loadFor,
     select,
     create,
+    rename,
     remove,
   }
 })

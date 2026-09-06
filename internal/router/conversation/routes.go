@@ -11,5 +11,6 @@ import (
 func Register(rg *gin.RouterGroup, h *handler.ConversationHandler) {
 	rg.POST("/agents/:agent_id/conversations", h.Create)
 	rg.GET("/agents/:agent_id/conversations", h.List)
+	rg.PUT("/agents/:agent_id/conversations/:conversation_id", h.Update)
 	rg.DELETE("/agents/:agent_id/conversations/:conversation_id", h.Delete)
 }

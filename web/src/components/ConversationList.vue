@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { nextTick, ref } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useConversationsStore } from '../stores/conversations'
 import type { Conversation } from '../types'
@@ -6,8 +8,41 @@ import type { Conversation } from '../types'
 const agents = useAgentsStore()
 const store = useConversationsStore()
 
+// 行内重命名状态：同一时刻只有一个会话处于编辑态。
+const editingId = ref<string | null>(null)
+const editText = ref('')
+const editInput = ref<HTMLInputElement | null>(null)
+
+// 用函数 ref 而非字符串 ref：v-for 内的字符串 ref 在 Vue 3 里会被收集成数组，
+// 这里同一时刻只有一个输入框，用函数 ref 直接拿到该元素更稳妥。
+function setEditInput(el: Element | ComponentPublicInstance | null) {
+  editInput.value = el as HTMLInputElement | null
+}
+
+async function startRename(conv: Conversation) {
+  editingId.value = conv.id
+  editText.value = conv.title
+  await nextTick()
+  editInput.value?.focus()
+  editInput.value?.select()
+}
+
+// 提交重命名。Enter 与 blur 都会触发，靠 editingId 判断避免重复提交。
+async function commitRename(conv: Conversation) {
+  if (editingId.value !== conv.id) return
+  const t = editText.value.trim()
+  editingId.value = null
+  if (t && t !== conv.title) await store.rename(conv.id, t)
+}
+
+function cancelRename() {
+  editingId.value = null
+}
+
+// 新建后立即进入编辑态，用户可直接给会话起名（不改就保留「新会话」）。
 async function onCreate() {
-  await store.create()
+  const conv = await store.create()
+  if (conv) startRename(conv)
 }
 
 async function onDelete(conv: Conversation) {
@@ -39,10 +74,10 @@ async function onDelete(conv: Conversation) {
           该 Agent 还没有会话。
         </p>
 
-        <button
+        <div
           v-for="conv in store.conversations"
           :key="conv.id"
-          class="group mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition"
+          class="group mb-1 flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-left transition"
           :class="
             conv.id === store.selectedId
               ? 'bg-blue-100 text-blue-900'
@@ -50,14 +85,31 @@ async function onDelete(conv: Conversation) {
           "
           @click="store.select(conv.id)"
         >
-          <span class="truncate text-sm">{{ conv.title }}</span>
+          <input
+            v-if="editingId === conv.id"
+            :ref="setEditInput"
+            v-model="editText"
+            type="text"
+            class="min-w-0 flex-1 rounded border border-blue-400 bg-white px-1.5 py-0.5 text-sm text-gray-800 focus:outline-none"
+            @click.stop
+            @keydown.enter.prevent="commitRename(conv)"
+            @keydown.esc="cancelRename"
+            @blur="commitRename(conv)"
+          />
+          <span v-else class="truncate text-sm">{{ conv.title }}</span>
+
           <span
-            class="ml-2 text-xs text-gray-400 opacity-0 hover:text-red-600 group-hover:opacity-100"
-            @click.stop="onDelete(conv)"
+            v-if="editingId !== conv.id"
+            class="ml-2 flex shrink-0 gap-2 text-xs opacity-0 group-hover:opacity-100"
           >
-            删除
+            <span class="text-gray-400 hover:text-blue-600" @click.stop="startRename(conv)">
+              重命名
+            </span>
+            <span class="text-gray-400 hover:text-red-600" @click.stop="onDelete(conv)">
+              删除
+            </span>
           </span>
-        </button>
+        </div>
       </template>
     </div>
   </div>
